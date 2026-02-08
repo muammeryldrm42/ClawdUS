@@ -1,0 +1,15 @@
+{
+  "name": "clawd-us",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:server": "npm --workspace apps/server run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "start:web": "npm --workspace apps/web run start",
+    "build:server": "npm --workspace apps/server run build",
+    "start:server": "npm --workspace apps/server run start"
+  }
+}
