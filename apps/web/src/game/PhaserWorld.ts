@@ -1,348 +1,242 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import Phaser from "phaser";
+import React, { useEffect, useRef } from "react";
 
 type Props = {
   state: any;
   me: any;
-  onSend: (obj:any) => void;
+  onSend: (obj: any) => void;
 };
 
+/**
+ * IMPORTANT:
+ * Phaser touches window/document at import time on some builds.
+ * To keep Vercel/Next build stable, we only import Phaser dynamically in useEffect (client-only).
+ */
 export default function PhaserWorld({ state, me, onSend }: Props) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const gameRef = useRef<Phaser.Game | null>(null);
-  const lastInputRef = useRef<any>({ up:false, down:false, left:false, right:false });
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const gameRef = useRef<any>(null);
+  const latestRef = useRef<{ state: any; me: any }>({ state, me });
 
+  // keep latest state for the scene to read
   useEffect(() => {
-    if (!ref.current) return;
-    if (gameRef.current) return;
-
-    const scene = new MainScene(state, me, onSend, lastInputRef);
-
-    const game = new Phaser.Game({
-      type: Phaser.AUTO,
-      parent: ref.current,
-      width: 640,
-      height: 560,
-      backgroundColor: "#0b0f17",
-      scene: [scene],
-      physics: { default: "arcade" }
-    });
-
-    gameRef.current = game;
-
-    return () => {
-      try { game.destroy(true); } catch {}
-      gameRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    // push state into scene
+    latestRef.current = { state, me };
     const g = gameRef.current;
-    if (!g) return;
-    const s = g.scene.getScenes(true)[0] as any;
-    if (s && s.applyState) s.applyState(state, me);
+    const scene = g?.scene?.keys?.main;
+    if (scene && scene.__setState) scene.__setState(state, me);
   }, [state, me]);
 
-  return <div style={{ width:"100%", height:"100%" }} ref={ref} />;
-}
+  useEffect(() => {
+    let destroyed = false;
 
-class MainScene extends Phaser.Scene {
-  state: any;
-  me: any;
-  onSend: (obj:any) => void;
-  lastInputRef: any;
+    async function boot() {
+      if (!hostRef.current) return;
 
-  cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  keys!: any;
+      const Phaser = (await import("phaser")).default;
+      if (destroyed) return;
 
-  playerSprites: Map<string, Phaser.GameObjects.Arc> = new Map();
-  nameTexts: Map<string, Phaser.GameObjects.Text> = new Map();
-  objSprites: Map<string, Phaser.GameObjects.Arc> = new Map();
-  bodySprites: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+      class MainScene extends Phaser.Scene {
+        cursors: any;
+        keys: any;
+        sprites: Map<string, any> = new Map();
+        labels: Map<string, any> = new Map();
+        bodies: Map<string, any> = new Map();
+        lastSend = 0;
 
-  darkness!: Phaser.GameObjects.Graphics;
+        create() {
+          this.cameras.main.setBackgroundColor(0x0b0f17);
 
-  constructor(state:any, me:any, onSend:any, lastInputRef:any) {
-    super("main");
-    this.state = state;
-    this.me = me;
-    this.onSend = onSend;
-    this.lastInputRef = lastInputRef;
-  }
+          const s0 = latestRef.current.state;
+          const mw = s0?.map?.width || 1200;
+          const mh = s0?.map?.height || 800;
+          this.physics.world.setBounds(0, 0, mw, mh);
+          this.cameras.main.setBounds(0, 0, mw, mh);
 
-  create() {
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = this.input.keyboard!.addKeys("W,A,S,D,E,K");
+          this.cursors = this.input.keyboard.createCursorKeys();
+          this.keys = this.input.keyboard.addKeys("W,A,S,D,E,K");
 
-    // click interaction
-    this.input.on("pointerdown", (pointer:Phaser.Input.Pointer) => {
-      const world = this.state?.map;
-      if (!world) return;
-      // Check near object circles by click distance (screen-space approx)
-      const mx = pointer.worldX;
-      const my = pointer.worldY;
-      const objs = world.objects || [];
-      for (const o of objs) {
-        const dx = mx - o.x * this.scaleX();
-        const dy = my - o.y * this.scaleY();
-        // We'll do interactions by proximity on server anyway; client just sends objectId
-      }
-    });
+          // initial paint
+          this.__setState(s0, latestRef.current.me);
 
-    this.darkness = this.add.graphics();
-  }
+          // Interact/report key
+          this.input.keyboard.on("keydown-E", () => {
+            const s = latestRef.current.state;
+            const objects = s?.map?.objects || [];
+            const my = this._getMe(s);
+            if (!my) return;
 
-  scaleX() {
-    const mw = this.state?.map?.width || 1200;
-    return 640 / mw;
-  }
-  scaleY() {
-    const mh = this.state?.map?.height || 800;
-    return 560 / mh;
-  }
+            // nearest object
+            let best: any = null;
+            let bestD = Infinity;
+            for (const o of objects) {
+              const r = o.radius || 60;
+              const dx = my.x - o.x;
+              const dy = my.y - o.y;
+              const d = dx * dx + dy * dy;
+              if (d <= r * r && d < bestD) {
+                bestD = d;
+                best = o;
+              }
+            }
 
-  applyState(state:any, me:any) {
-    this.state = state;
-    this.me = me;
-  }
+            if (best) {
+              if (best.type === "task" || best.type === "fix") onSend({ t: "action.interact", objectId: best.id });
+              if (best.type === "meeting") onSend({ t: "action.meeting_call" });
+              return;
+            }
 
-  update() {
-    if (!this.state) return;
-    const sx = this.scaleX(), sy = this.scaleY();
+            // body report fallback
+            const bodies = s?.bodies || [];
+            let bbest: any = null;
+            let bbestD = Infinity;
+            for (const b of bodies) {
+              const dx = my.x - b.x;
+              const dy = my.y - b.y;
+              const d = dx * dx + dy * dy;
+              if (d <= 90 * 90 && d < bbestD) {
+                bbestD = d;
+                bbest = b;
+              }
+            }
+            if (bbest) onSend({ t: "action.report", bodyId: bbest.id });
+          });
 
-    // Input → server (throttled by change)
-    const input = {
-      up: !!(this.cursors.up.isDown || this.keys.W.isDown),
-      down: !!(this.cursors.down.isDown || this.keys.S.isDown),
-      left: !!(this.cursors.left.isDown || this.keys.A.isDown),
-      right: !!(this.cursors.right.isDown || this.keys.D.isDown),
-    };
-    const last = this.lastInputRef.current;
-    const changed = input.up!==last.up || input.down!==last.down || input.left!==last.left || input.right!==last.right;
-    if (changed) {
-      this.lastInputRef.current = input;
-      this.onSend({ t:"input", input });
-    }
+          // Kill key (saboteur)
+          this.input.keyboard.on("keydown-K", () => {
+            const s = latestRef.current.state;
+            const my = this._getMe(s);
+            if (!my || my.role !== "saboteur") return;
 
-    // Interact key E: find nearest object
-    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
-      const my = this.mePlayer();
-      if (my) {
-        const obj = nearestObject(this.state.map.objects, my.x, my.y, 90);
-        if (obj) this.onSend({ t:"action.interact", objectId: obj.id });
-        const body = nearestBody(this.state.bodies, my.x, my.y, 90);
-        if (body) this.onSend({ t:"action.report", bodyId: body.id });
-      }
-    }
+            const players = s?.players || [];
+            let best: any = null;
+            let bestD = Infinity;
+            for (const p of players) {
+              if (!p.alive) continue;
+              if (p.id === my.id) continue;
+              const dx = my.x - p.x;
+              const dy = my.y - p.y;
+              const d = dx * dx + dy * dy;
+              if (d <= 70 * 70 && d < bestD) {
+                bestD = d;
+                best = p;
+              }
+            }
+            if (best) onSend({ t: "action.kill", targetId: best.id });
+          });
+        }
 
-    // Kill key K (saboteur): nearest living player
-    if (Phaser.Input.Keyboard.JustDown(this.keys.K)) {
-      if (this.me?.role === "saboteur" && this.state.phase === "playing") {
-        const my = this.mePlayer();
-        if (my) {
-          const target = nearestAliveTarget(this.state.players, my.id, my.x, my.y, 80);
-          if (target) this.onSend({ t:"action.kill", targetId: target.id });
+        __setState(s: any, _m: any) {
+          const players = s?.players || [];
+
+          // ensure sprites exist
+          for (const p of players) {
+            let spr = this.sprites.get(p.id);
+            let lbl = this.labels.get(p.id);
+            if (!spr) {
+              spr = this.add.circle(p.x, p.y, 14, 0x61dafb);
+              this.sprites.set(p.id, spr);
+            }
+            if (!lbl) {
+              lbl = this.add.text(p.x - 22, p.y - 36, p.username, { fontSize: "12px" });
+              this.labels.set(p.id, lbl);
+            }
+          }
+
+          // remove missing
+          for (const id of [...this.sprites.keys()]) {
+            if (!players.find((p: any) => p.id === id)) {
+              this.sprites.get(id)?.destroy();
+              this.labels.get(id)?.destroy();
+              this.sprites.delete(id);
+              this.labels.delete(id);
+            }
+          }
+
+          // bodies
+          const bodies = s?.bodies || [];
+          for (const b of bodies) {
+            if (!this.bodies.has(b.id)) {
+              const r = this.add.rectangle(b.x, b.y, 22, 14, 0xff5a7a);
+              this.bodies.set(b.id, r);
+            }
+          }
+          for (const id of [...this.bodies.keys()]) {
+            if (!bodies.find((b: any) => b.id === id)) {
+              this.bodies.get(id)?.destroy();
+              this.bodies.delete(id);
+            }
+          }
+
+          // center camera on me
+          const my = this._getMe(s);
+          if (my) this.cameras.main.centerOn(my.x, my.y);
+        }
+
+        _getMe(s: any) {
+          // only self has role populated in server state payload
+          return (s?.players || []).find((p: any) => p.role) || null;
+        }
+
+        update(_time: number) {
+          const s = latestRef.current.state;
+          if (!s) return;
+
+          // update visuals
+          for (const p of s.players || []) {
+            const spr = this.sprites.get(p.id);
+            const lbl = this.labels.get(p.id);
+            if (spr) {
+              spr.x = p.x;
+              spr.y = p.y;
+              spr.setAlpha(p.alive ? 1 : 0.35);
+            }
+            if (lbl) {
+              lbl.x = p.x - 22;
+              lbl.y = p.y - 36;
+              lbl.setAlpha(p.alive ? 1 : 0.5);
+            }
+          }
+
+          // send input at ~20Hz
+          const meP = this._getMe(s);
+          if (!meP) return;
+          if (s.phase === "meeting" || s.phase === "ended") return;
+
+          const up = !!(this.cursors.up?.isDown || this.keys.W?.isDown);
+          const down = !!(this.cursors.down?.isDown || this.keys.S?.isDown);
+          const left = !!(this.cursors.left?.isDown || this.keys.A?.isDown);
+          const right = !!(this.cursors.right?.isDown || this.keys.D?.isDown);
+
+          const now = performance.now();
+          if (now - this.lastSend > 50) {
+            this.lastSend = now;
+            onSend({ t: "input", input: { up, down, left, right } });
+          }
         }
       }
+
+      const game = new Phaser.Game({
+        type: Phaser.AUTO,
+        parent: hostRef.current,
+        width: 640,
+        height: 560,
+        physics: { default: "arcade" },
+        scene: MainScene
+      });
+
+      gameRef.current = game;
     }
 
-    // Draw map background
-    this.drawBackground();
+    boot();
 
-    // Draw objects
-    this.drawObjects();
+    return () => {
+      destroyed = true;
+      try {
+        gameRef.current?.destroy(true);
+      } catch {}
+      gameRef.current = null;
+    };
+  }, []);
 
-    // Draw bodies
-    this.drawBodies();
-
-    // Draw players
-    this.drawPlayers();
-
-    // Draw darkness overlay for lights sabotage
-    this.drawDarkness();
-  }
-
-  mePlayer() {
-    const ps = this.state.players || [];
-    // self is the one with role present
-    return ps.find((p:any)=>p.role);
-  }
-
-  drawBackground() {
-    // simple grid
-    const g = this.add.graphics();
-    g.clear();
-    g.lineStyle(1, 0x1d2a44, 0.35);
-
-    const w = 640, h = 560;
-    for (let x=0; x<=w; x+=40) { g.lineBetween(x,0,x,h); }
-    for (let y=0; y<=h; y+=40) { g.lineBetween(0,y,w,y); }
-
-    // border
-    g.lineStyle(2, 0xffffff, 0.12);
-    g.strokeRect(10,10,w-20,h-20);
-
-    // remove next tick
-    g.destroy();
-  }
-
-  drawObjects() {
-    const objs = this.state.map?.objects || [];
-    const sx = this.scaleX(), sy = this.scaleY();
-
-    // keep and update circles
-    const seen = new Set<string>();
-    for (const o of objs) {
-      seen.add(o.id);
-      let circle = this.objSprites.get(o.id);
-      if (!circle) {
-        circle = this.add.circle(o.x*sx, o.y*sy, Math.max(10, o.radius*Math.min(sx,sy)), 0x61dafb, 0.10);
-        this.objSprites.set(o.id, circle);
-        const t = this.add.text(o.x*sx - 40, o.y*sy - 8, o.label, { fontSize:"12px", color:"#8aa0c2" });
-        (t as any).__objId = o.id;
-        this.nameTexts.set("obj_"+o.id, t);
-      }
-      circle.setPosition(o.x*sx, o.y*sy);
-
-      // color by type
-      if (o.type === "task") circle.setFillStyle(0x4ade80, 0.10);
-      if (o.type === "fix") circle.setFillStyle(0x61dafb, 0.10);
-      if (o.type === "meeting") circle.setFillStyle(0xff5a7a, 0.08);
-
-      const t = this.nameTexts.get("obj_"+o.id);
-      if (t) t.setPosition(o.x*sx - 44, o.y*sy - 8);
-    }
-
-    // cleanup removed
-    for (const [id, c] of this.objSprites.entries()) {
-      if (!seen.has(id)) { c.destroy(); this.objSprites.delete(id); }
-    }
-  }
-
-  drawPlayers() {
-    const ps = this.state.players || [];
-    const sx = this.scaleX(), sy = this.scaleY();
-    const seen = new Set<string>();
-
-    for (const p of ps) {
-      seen.add(p.id);
-
-      let spr = this.playerSprites.get(p.id);
-      if (!spr) {
-        spr = this.add.circle(p.x*sx, p.y*sy, 10, 0xffffff, 1);
-        this.playerSprites.set(p.id, spr);
-        const nt = this.add.text(p.x*sx + 12, p.y*sy - 8, p.username, { fontSize:"12px", color:"#e6edf6" });
-        this.nameTexts.set(p.id, nt);
-      }
-      spr.setPosition(p.x*sx, p.y*sy);
-
-      // color
-      if (!p.alive) spr.setFillStyle(0x8aa0c2, 0.6);
-      else spr.setFillStyle(p.role === "saboteur" ? 0xff5a7a : 0x4ade80, p.role ? 1 : 0.75);
-
-      const nt = this.nameTexts.get(p.id);
-      if (nt) nt.setPosition(p.x*sx + 12, p.y*sy - 8);
-    }
-
-    for (const [id, spr] of this.playerSprites.entries()) {
-      if (!seen.has(id)) { spr.destroy(); this.playerSprites.delete(id); }
-    }
-    for (const [id, t] of this.nameTexts.entries()) {
-      if (id.startsWith("obj_")) continue;
-      if (!seen.has(id)) { t.destroy(); this.nameTexts.delete(id); }
-    }
-  }
-
-  drawBodies() {
-    const bodies = this.state.bodies || [];
-    const sx = this.scaleX(), sy = this.scaleY();
-    const seen = new Set<string>();
-
-    for (const b of bodies) {
-      seen.add(b.id);
-      let r = this.bodySprites.get(b.id);
-      if (!r) {
-        r = this.add.rectangle(b.x*sx, b.y*sy, 18, 10, 0xff5a7a, 0.9);
-        this.bodySprites.set(b.id, r);
-      }
-      r.setPosition(b.x*sx, b.y*sy);
-    }
-
-    for (const [id, r] of this.bodySprites.entries()) {
-      if (!seen.has(id)) { r.destroy(); this.bodySprites.delete(id); }
-    }
-  }
-
-  drawDarkness() {
-    const lights = this.state?.sabotage?.lights;
-    const active = !!lights?.active;
-    this.darkness.clear();
-    if (!active) return;
-
-    // simple darkness overlay with a visible circle around the player
-    const my = this.mePlayer();
-    const sx = this.scaleX(), sy = this.scaleY();
-
-    this.darkness.fillStyle(0x000000, 0.62);
-    this.darkness.fillRect(0, 0, 640, 560);
-
-    if (my) {
-      const cx = my.x * sx;
-      const cy = my.y * sy;
-      const r = 120;
-      this.darkness.setBlendMode(Phaser.BlendModes.NORMAL);
-      this.darkness.fillStyle(0x000000, 0.0);
-      this.darkness.beginPath();
-      this.darkness.arc(cx, cy, r, 0, Math.PI*2);
-      this.darkness.closePath();
-      this.darkness.fillPath();
-
-      // Punch hole effect by drawing with ERASE blend mode
-      this.darkness.setBlendMode(Phaser.BlendModes.ERASE);
-      this.darkness.fillCircle(cx, cy, r);
-      this.darkness.setBlendMode(Phaser.BlendModes.NORMAL);
-    }
-  }
-}
-
-// helpers
-function nearestObject(objs:any[], x:number, y:number, maxDist:number) {
-  if (!objs) return null;
-  let best:any = null;
-  let bestD = maxDist*maxDist;
-  for (const o of objs) {
-    const dx = o.x - x, dy = o.y - y;
-    const d = dx*dx+dy*dy;
-    if (d < bestD) { bestD = d; best = o; }
-  }
-  return best;
-}
-function nearestBody(bodies:any[], x:number, y:number, maxDist:number) {
-  if (!bodies) return null;
-  let best:any = null;
-  let bestD = maxDist*maxDist;
-  for (const b of bodies) {
-    const dx = b.x - x, dy = b.y - y;
-    const d = dx*dx+dy*dy;
-    if (d < bestD) { bestD = d; best = b; }
-  }
-  return best;
-}
-function nearestAliveTarget(players:any[], selfId:string, x:number, y:number, maxDist:number) {
-  if (!players) return null;
-  let best:any = null;
-  let bestD = maxDist*maxDist;
-  for (const p of players) {
-    if (p.id === selfId) continue;
-    if (!p.alive) continue;
-    // role hidden for others; we just target any alive
-    const dx = p.x - x, dy = p.y - y;
-    const d = dx*dx+dy*dy;
-    if (d < bestD) { bestD = d; best = p; }
-  }
-  return best;
+  return <div style={{ width: "100%", height: "100%" }} ref={hostRef} />;
 }
